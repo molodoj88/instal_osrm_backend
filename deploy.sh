@@ -18,12 +18,8 @@ if [ -z "$*" ]; then
     print_help
 fi
 
-OSRM_IMAGE=osrm/osrm-backend
-MAPS=maps
 EXTRACTS_URL=""
 EXTRACTS_FILEPATH=""
-EXPOSED_PORT=5000
-CONATAINER_NAME=osrm-backend
 
 # Get command line arguments:
 while getopts e:f:p:h flag
@@ -43,16 +39,6 @@ if [ "$EXTRACTS_URL" == "" ]; then
     fi
 fi
 
-# Get filename from url:
-if [ "$EXTRACTS_URL" != "" ]; then
-    MAPS_DEFAULT_FILENAME=$(basename "$EXTRACTS_URL")
-else
-    MAPS_DEFAULT_FILENAME=$(basename "$EXTRACTS_FILEPATH")
-fi
-
-MAPS_EXTRACTED_FILENAME=$(echo $MAPS_DEFAULT_FILENAME | sed 's/\./\n/g' | head -n 1).osrm
-
-
 function install_docker () {
     echo "Installing docker"
     DOCKER_SCRIPT_PATH=/tmp/get-docker.sh
@@ -71,46 +57,20 @@ case $? in
         ;;
 esac
 
-# Install osrm-backend
-echo "Starting osrm-backend installation"
-
-# 1. Create directory for maps:
-mkdir -p $MAPS
-
-# 2. Download extracts (or copy file if -f option is provided):
-if [ "$EXTRACTS_FILEPATH" != "" ]; then
-    echo "y" | cp -f $EXTRACTS_FILEPATH $MAPS/$MAPS_DEFAULT_FILENAME
-else
+if [ "$EXTRACTS_URL" != "" ]; then
     wget -P $MAPS $EXTRACTS_URL
     if [ $? -ne 0 ]; then
         echo "Can't download extracts file"
         exit 1
     fi
+    MAPS_DEFAULT_FILENAME=$(basename "$EXTRACTS_URL")
+    EXTRACTS_FILEPATH=/tmp/$MAPS_DEFAULT_FILENAME
 fi
 
-# 3. Pull osrm-backend image:
-docker pull $OSRM_IMAGE
+# Deploy osrm server
+bash deploy_osrm.sh -p $EXPOSED_PORT -f $EXTRACTS_FILEPATH
 
-# 4. Preprocess extracts with cars profile:
-docker run -t -v "${PWD}/$MAPS:/data" $OSRM_IMAGE osrm-extract -p /opt/car.lua /data/$MAPS_DEFAULT_FILENAME
-docker run -t -v "${PWD}/$MAPS:/data" $OSRM_IMAGE osrm-partition /data/$MAPS_EXTRACTED_FILENAME
-docker run -t -v "${PWD}/$MAPS:/data" $OSRM_IMAGE osrm-customize /data/$MAPS_EXTRACTED_FILENAME
-
-# 5. Start main container:
-docker run -t -d -p $EXPOSED_PORT:5000 -v "${PWD}/$MAPS:/data" --name $CONATAINER_NAME --restart always $OSRM_IMAGE osrm-routed --algorithm mld /data/$MAPS_EXTRACTED_FILENAME
-if [ $? -ne 0 ]; then
-    echo "Can't start osrm server. See logs above ^"
-    exit 1
-fi
-
-echo Cleanup unused containers...
-while IFS= read -r line; do
-    container=$(echo $line | sed 's/\ /\n/g' | head -n 1)
-    docker rm $container
-done <<< "$(docker ps -a | grep osrm | grep Exited)"
-echo Done!
-echo
-
-echo "Server successfully started on port $EXPOSED_PORT"
-echo "You can check if it works with a next query, for example:"
-echo '    curl "http://127.0.0.1:5000/route/v1/driving/44.505701,48.699783;44.482893,48.686069" | jq'
+# Deploy nominatim
+# Define number of cores at first
+THREADS=$(cat /proc/cpuinfo | grep -c processor)
+bash deploy_nominatim.sh -f $EXTRACTS_FILEPATH -c $THREADS
